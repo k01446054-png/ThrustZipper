@@ -1,0 +1,726 @@
+// ======================================================
+// TRUST ZIPPER - СТАБИЛЬНАЯ ВЕРСИЯ (ИСПРАВЛЕНАЯ)
+// ======================================================
+
+let tg = null;
+let currentUser = null;
+
+try {
+    if (window.Telegram && window.Telegram.WebApp) {
+        tg = window.Telegram.WebApp;
+        if (tg && typeof tg.expand === 'function') tg.expand();
+        if (tg && typeof tg.ready === 'function') tg.ready();
+    }
+} catch(e) { console.log('Telegram init error: - javascript.js:14', e); }
+
+if (!tg) {
+    tg = {
+        initDataUnsafe: { user: null, start_param: null },
+        showPopup: (options) => alert(options.message || options.title),
+        sendData: () => {},
+        MainButton: { hide: () => {}, show: () => {} },
+        BackButton: { hide: () => {}, show: () => {} },
+        onEvent: () => {},
+        offEvent: () => {},
+        expand: () => {},
+        ready: () => {}
+    };
+}
+
+try {
+    currentUser = (tg.initDataUnsafe && tg.initDataUnsafe.user) ? tg.initDataUnsafe.user : {
+        id: Date.now(),
+        username: 'user_' + Math.floor(Math.random() * 10000),
+        first_name: 'Пользователь'
+    };
+} catch(e) {
+    currentUser = { id: Date.now(), username: 'user_' + Math.floor(Math.random() * 10000), first_name: 'Пользователь' };
+}
+
+function getStartParam() {
+    try { return tg.initDataUnsafe?.start_param || null; } catch(e) { return null; }
+}
+
+// ========== ПЕРЕМЕННЫЕ ==========
+let wallets = {};
+let deals = [];
+let currentDeal = null;
+let selectedCurrency = 'USDT';
+let pendingCryptoType = null;
+let currentScreen = null;
+let isPaymentOptionsVisible = false;
+let currentBuyerUsername = null;
+
+const currencySymbols = { 'TON': 'TON', 'USDT': 'USDT', 'RUB': '₽', 'STARS': '★', 'UAH': '₴', 'EUR': '€' };
+const BOT_USERNAME = 'TrustZippersBot';
+
+// Загрузка данных
+try { const saved = localStorage.getItem('trustzipper_wallets'); if (saved) wallets = JSON.parse(saved); } catch(e) { wallets = {}; }
+try { const saved = localStorage.getItem('trustzipper_deals'); if (saved) deals = JSON.parse(saved); } catch(e) { deals = []; }
+
+function saveWallets() { try { localStorage.setItem('trustzipper_wallets', JSON.stringify(wallets)); } catch(e) {} }
+function saveDeals() { try { localStorage.setItem('trustzipper_deals', JSON.stringify(deals)); } catch(e) {} }
+
+function updateDealStatus(dealId, status) {
+    const index = deals.findIndex(d => d.id === dealId);
+    if (index !== -1) {
+        deals[index].status = status;
+        saveDeals();
+        renderHistoryList();
+    }
+}
+
+// ========== КОДИРОВАНИЕ ДАННЫХ ==========
+function encodeDealData(deal) {
+    const data = {
+        id: deal.id,
+        n: deal.name,
+        a: deal.amount,
+        c: deal.currency,
+        su: deal.sellerUsername,
+        si: deal.sellerId,
+        b: currentBuyerUsername,
+        status: deal.status || 'waiting_buyer'
+    };
+    return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+}
+
+function decodeDealData(encoded) {
+    try {
+        const json = decodeURIComponent(escape(atob(encoded)));
+        const data = JSON.parse(json);
+        return {
+            id: data.id,
+            name: data.n,
+            amount: data.a,
+            currency: data.c,
+            sellerUsername: data.su,
+            sellerId: data.si,
+            buyerUsername: data.b || 'Покупатель',
+            createdAt: getFormattedDate(),
+            status: data.status || 'waiting_buyer'
+        };
+    } catch(e) { return null; }
+}
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ ==========
+function generateDealId() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '#';
+    for (let i = 0; i < 12; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+    return result;
+}
+
+function formatAmount(amount, currency) {
+    if (amount === undefined || amount === null || isNaN(amount)) return '0';
+    const symbol = currencySymbols[currency] || currency;
+    const num = parseFloat(amount);
+    if (isNaN(num)) return '0';
+    const formatted = num.toFixed(2).replace(/\.00$/, '');
+    return `${formatted} ${symbol}`;
+}
+
+function calculateAmountWithFee(amount, feePayer) { return feePayer === 'buyer' ? amount * 1.02 : amount; }
+
+function getFormattedDate() {
+    try {
+        const now = new Date();
+        const months = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+        return `${now.getDate()} ${months[now.getMonth()]} · ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    } catch(e) { return 'Дата неизвестна'; }
+}
+
+function showMessage(title, message) {
+    try { if (tg && tg.showPopup) tg.showPopup({ title, message, buttons: [{ type: 'ok' }] }); else alert(title + ': ' + message); } catch(e) { alert(title + ': ' + message); }
+}
+
+function safeCopy(text) {
+    if (!text) return;
+    try { 
+        if (navigator.clipboard) navigator.clipboard.writeText(text); 
+        else { 
+            let ta = document.createElement('textarea'); 
+            ta.value = text; 
+            document.body.appendChild(ta); 
+            ta.select(); 
+            document.execCommand('copy'); 
+            document.body.removeChild(ta); 
+        } 
+        showMessage('Скопировано', 'Данные скопированы');
+    } catch(e) {}
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/[&<>]/g, function(m) { if (m === '&') return '&amp;'; if (m === '<') return '&lt;'; if (m === '>') return '&gt;'; return m; });
+}
+
+function sendToBot(action, data) {
+    if (tg && tg.sendData) {
+        try {
+            const payload = { action, ...data };
+            tg.sendData(JSON.stringify(payload));
+            console.log('Отправлено в бот: - javascript.js:163', payload);
+        } catch(e) {
+            console.error('Ошибка отправки в бот: - javascript.js:165', e);
+        }
+    }
+}
+
+// ========== ОТОБРАЖЕНИЕ ==========
+function renderWalletsList() {
+    const container = document.getElementById('walletsList');
+    if (!container) return;
+    if (Object.keys(wallets).length === 0) { container.innerHTML = '<div style="text-align: center; color: #8a8f9e;">Нет кошельков</div>'; return; }
+    let html = '';
+    for (const [type, data] of Object.entries(wallets)) {
+        let typeName = '';
+        switch(type) { case 'card': typeName = 'Банковская карта'; break; case 'btc': typeName = 'Bitcoin'; break; case 'eth': typeName = 'Ethereum'; break; case 'ton': typeName = 'TON кошелёк'; break; case 'usdt': typeName = 'USDT'; break; default: typeName = type; }
+        html += `<div class="wallet-item"><div class="wallet-type">${typeName}</div><div class="wallet-address">${escapeHtml(data.address)}</div><span class="delete-wallet" data-wallet-type="${type}">Удалить</span></div>`;
+    }
+    container.innerHTML = html;
+    document.querySelectorAll('.delete-wallet').forEach(el => {
+        el.addEventListener('click', (e) => {
+            const walletType = e.target.dataset.walletType;
+            delete wallets[walletType];
+            saveWallets();
+            renderWalletsList();
+            showMessage('Удалено', 'Кошелек удален');
+        });
+    });
+}
+
+function renderHistoryList() {
+    const container = document.getElementById('historyList');
+    if (!container) return;
+    const userDeals = deals.filter(d => d.sellerId === currentUser.id);
+    if (userDeals.length === 0) { container.innerHTML = '<div style="text-align: center; color: #8a8f9e;">Нет сделок</div>'; return; }
+    let html = '';
+    for (const deal of [...userDeals].reverse()) {
+        let statusText = '';
+        switch(deal.status) { case 'completed': statusText = 'Завершена'; break; case 'paid': statusText = 'Оплачена'; break; default: statusText = 'Ожидание'; }
+        html += `<div class="deal-history-item"><div class="flex-between mb-1"><strong>${escapeHtml(deal.name)}</strong><span>${statusText}</span></div><div class="flex-between mb-1"><span>${deal.amount} ${deal.currency}</span></div><div class="flex-between"><span>${deal.id}</span></div></div>`;
+    }
+    container.innerHTML = html;
+}
+
+function updateReferralLink() {
+    let linkInput = document.getElementById('referralLinkInput');
+    if (linkInput) linkInput.value = `https://t.me/${BOT_USERNAME}?startapp=ref_${currentUser.id}`;
+}
+
+function showScreenById(screenId) {
+    if (currentScreen === screenId) return;
+    const allScreens = ['mainScreen', 'joinDealScreen', 'infoScreen', 'supportScreen', 'referralScreen', 'walletScreen', 'addCardScreen', 'selectCryptoScreen', 'addCryptoScreen', 'addTonScreen', 'listWalletsScreen', 'historyScreen', 'createDealScreen', 'dealProgressScreen', 'dealCreatedScreen', 'paymentScreen', 'dealPaidScreen', 'buyerWaitingScreen', 'buyerConfirmedScreen', 'successScreen', 'sellerPaymentConfirmedScreen'];
+    allScreens.forEach(id => { let el = document.getElementById(id); if (el) el.classList.add('hidden'); });
+    let target = document.getElementById(screenId);
+    if (target) target.classList.remove('hidden');
+    if (screenId === 'listWalletsScreen') renderWalletsList();
+    if (screenId === 'historyScreen') renderHistoryList();
+    if (screenId === 'referralScreen') updateReferralLink();
+    currentScreen = screenId;
+}
+
+// ========== ЭКРАНЫ ==========
+function openPaymentScreen(deal) {
+    if (!deal) { showMessage('Ошибка', 'Сделка не найдена'); showScreenById('mainScreen'); return; }
+    console.log('Открываем оплату: - javascript.js:227', deal);
+    currentDeal = deal;
+    const formattedAmount = formatAmount(deal.amount, deal.currency || 'USDT');
+    
+    const elements = ['paymentDealName', 'paymentDealAmount', 'paymentDealId', 'cardAmount', 'cryptoAmount', 'cardAmountInline', 'cryptoAmountInline'];
+    elements.forEach(id => { let el = document.getElementById(id); if (el) el.textContent = id.includes('Name') ? (deal.name || 'Сделка') : (id.includes('Id') ? deal.id : formattedAmount); });
+    
+    const cardBlock = document.getElementById('cardPaymentBlock');
+    const cryptoBlock = document.getElementById('cryptoPaymentBlock');
+    if (cardBlock) cardBlock.classList.add('hidden');
+    if (cryptoBlock) cryptoBlock.classList.add('hidden');
+    
+    isPaymentOptionsVisible = false;
+    const btn = document.getElementById('openPaymentOptionsBtn');
+    if (btn) btn.textContent = 'Оплатить';
+    
+    showScreenById('paymentScreen');
+}
+
+function togglePaymentOptions() {
+    let cardBlock = document.getElementById('cardPaymentBlock');
+    let cryptoBlock = document.getElementById('cryptoPaymentBlock');
+    let openBtn = document.getElementById('openPaymentOptionsBtn');
+    if (!isPaymentOptionsVisible) { 
+        if (cardBlock) cardBlock.classList.remove('hidden'); 
+        if (cryptoBlock) cryptoBlock.classList.add('hidden'); 
+        if (openBtn) openBtn.textContent = 'Оплата картой'; 
+        isPaymentOptionsVisible = true; 
+    } else { 
+        if (cardBlock) cardBlock.classList.add('hidden'); 
+        if (cryptoBlock) cryptoBlock.classList.add('hidden'); 
+        if (openBtn) openBtn.textContent = 'Оплатить'; 
+        isPaymentOptionsVisible = false; 
+    }
+}
+
+function copyCardNumber() { let num = document.getElementById('cardNumberDisplay')?.textContent; if (num) safeCopy(num); }
+function copyWalletAddress() { let addr = document.getElementById('walletAddress')?.textContent; if (addr) safeCopy(addr); }
+
+function confirmCardPayment() { 
+    showMessage('Отправлено', 'Ожидайте проверки 1-3 минуты');
+    if (currentDeal) {
+        updateDealStatus(currentDeal.id, 'paid');
+        setTimeout(() => { showScreenById('buyerWaitingScreen'); updateWaitingScreenData(); }, 500);
+    }
+}
+
+function confirmCryptoPayment() { 
+    showMessage('Отправлено', 'Ожидайте проверки 2-5 минут');
+    if (currentDeal) {
+        updateDealStatus(currentDeal.id, 'paid');
+        setTimeout(() => { showScreenById('buyerWaitingScreen'); updateWaitingScreenData(); }, 500);
+    }
+}
+
+function updateWaitingScreenData() {
+    if (!currentDeal) return;
+    const formattedAmount = formatAmount(currentDeal.amount, currentDeal.currency);
+    if (document.getElementById('waitingDealId')) document.getElementById('waitingDealId').textContent = currentDeal.id;
+    if (document.getElementById('waitingDealAmount')) document.getElementById('waitingDealAmount').textContent = formattedAmount;
+    if (document.getElementById('waitingSellerName')) document.getElementById('waitingSellerName').textContent = currentDeal.sellerUsername || 'Продавец';
+}
+
+function updateDealPaidScreenData() {
+    if (!currentDeal) return;
+    const formattedAmount = formatAmount(currentDeal.amount, currentDeal.currency);
+    if (document.getElementById('paidDealId')) document.getElementById('paidDealId').textContent = currentDeal.id;
+    if (document.getElementById('paidDealAmount')) document.getElementById('paidDealAmount').textContent = formattedAmount;
+    if (document.getElementById('paidBuyerName')) document.getElementById('paidBuyerName').textContent = currentDeal.buyerUsername || 'Покупатель';
+}
+
+function updateBuyerConfirmedScreenData() {
+    if (!currentDeal) return;
+    const formattedAmount = formatAmount(currentDeal.amount, currentDeal.currency);
+    if (document.getElementById('confirmedDealId')) document.getElementById('confirmedDealId').textContent = currentDeal.id;
+    if (document.getElementById('confirmedDealAmount')) document.getElementById('confirmedDealAmount').textContent = formattedAmount;
+    if (document.getElementById('confirmedBuyerName')) document.getElementById('confirmedBuyerName').textContent = currentDeal.buyerUsername || 'Покупатель';
+}
+
+function updateSellerPaymentConfirmedScreenData() {
+    if (!currentDeal) return;
+    const formattedAmount = formatAmount(currentDeal.amount, currentDeal.currency);
+    if (document.getElementById('sellerConfirmedDealId')) document.getElementById('sellerConfirmedDealId').textContent = currentDeal.id;
+    if (document.getElementById('sellerConfirmedDealAmount')) document.getElementById('sellerConfirmedDealAmount').textContent = formattedAmount;
+    if (document.getElementById('sellerConfirmedBuyerName')) document.getElementById('sellerConfirmedBuyerName').textContent = currentDeal.buyerUsername || 'Покупатель';
+}
+
+// Функция для создания чека для продавца (ссылка на экран подтверждённой оплаты)
+function generateSellerReceipt() {
+    if (!currentDeal) {
+        showMessage('Ошибка', 'Сделка не найдена');
+        return;
+    }
+    
+    // Создаём копию сделки со статусом 'paid' для отображения подтверждения оплаты
+    const receiptDeal = {
+        ...currentDeal,
+        status: 'paid'
+    };
+    
+    const encodedData = encodeDealData(receiptDeal);
+    const receiptLink = `https://t.me/${BOT_USERNAME}?startapp=seller_confirm_${encodedData}`;
+    safeCopy(receiptLink);
+    showMessage('Чек скопирован', 'Отправьте ссылку продавцу для подтверждения оплаты');
+}
+
+// Обработка ссылки продавца (подтверждение оплаты)
+function handleSellerConfirmLink(encodedData) {
+    let deal = decodeDealData(encodedData);
+    if (deal) {
+        currentDeal = deal;
+        updateSellerPaymentConfirmedScreenData();
+        showScreenById('sellerPaymentConfirmedScreen');
+    } else {
+        showMessage('Ошибка', 'Неверные данные сделки');
+        showScreenById('mainScreen');
+    }
+}
+
+// Подтверждение отправки NFT от продавца
+function confirmNftSent() {
+    if (!currentDeal) {
+        showMessage('Ошибка', 'Сделка не найдена');
+        return;
+    }
+    showMessage('Отправлено', 'Уведомление отправлено покупателю. Ожидайте подтверждения получения.');
+    sendToBot('nft_sent', { deal_id: currentDeal.id, seller_id: currentUser.id });
+}
+
+// Подтверждение получения NFT от покупателя
+function confirmGiftReceived() {
+    if (!currentDeal) {
+        showMessage('Ошибка', 'Сделка не найдена');
+        return;
+    }
+    showMessage('Подтверждено', 'Спасибо! Средства будут переведены продавцу.');
+    updateDealStatus(currentDeal.id, 'completed');
+    updateBuyerConfirmedScreenData();
+    setTimeout(() => showScreenById('buyerConfirmedScreen'), 300);
+}
+
+// Подтверждение получения оплаты продавцом (переход к отправке NFT)
+function confirmPaymentReceivedBySeller() {
+    if (!currentDeal) {
+        showMessage('Ошибка', 'Сделка не найдена');
+        return;
+    }
+    updateDealPaidScreenData();
+    showScreenById('dealPaidScreen');
+}
+
+// ========== СОЗДАНИЕ СДЕЛКИ ==========
+function createDeal() {
+    let name = document.getElementById('dealName')?.value.trim();
+    let amount = parseFloat(document.getElementById('amount')?.value);
+    if (!name) { showMessage('Ошибка', 'Введите название'); return; }
+    if (!amount || amount < 0.1) { showMessage('Ошибка', 'Минимальная сумма 0.1'); return; }
+    let feePayerElem = document.querySelector('input[name="feePayer"]:checked');
+    let feePayer = feePayerElem ? feePayerElem.value : 'buyer';
+    let finalAmount = calculateAmountWithFee(amount, feePayer);
+    let sellerUsername = currentUser.username ? `@${currentUser.username}` : `user_${currentUser.id}`;
+    
+    // ФИКС: используем выбранную валюту
+    currentDeal = {
+        id: generateDealId(),
+        name: name,
+        amount: finalAmount,
+        currency: selectedCurrency,
+        sellerId: currentUser.id,
+        sellerUsername: sellerUsername,
+        createdAt: getFormattedDate(),
+        status: 'waiting_buyer'
+    };
+    deals.push(currentDeal);
+    saveDeals();
+    
+    if (document.getElementById('dealCreatedAmount')) document.getElementById('dealCreatedAmount').textContent = formatAmount(currentDeal.amount, currentDeal.currency);
+    if (document.getElementById('dealCreatedId')) document.getElementById('dealCreatedId').textContent = currentDeal.id;
+    showScreenById('dealCreatedScreen');
+}
+
+function copyPaymentLink() {
+    if (!currentDeal) { showMessage('Ошибка', 'Сделка не создана'); return; }
+    const encodedData = encodeDealData(currentDeal);
+    const paymentLink = `https://t.me/${BOT_USERNAME}?startapp=pay_DATA_${encodedData}`;
+    safeCopy(paymentLink);
+    showMessage('Ссылка готова!', 'Отправьте её покупателю для оплаты.');
+}
+
+function copyDealId() { if (currentDeal) safeCopy(currentDeal.id); }
+
+function inviteBuyer() {
+    if (!currentDeal) { showMessage('Ошибка', 'Сначала создайте сделку'); return; }
+    const encodedData = encodeDealData(currentDeal);
+    const link = `https://t.me/${BOT_USERNAME}?startapp=deal_DATA_${encodedData}`;
+    safeCopy(link);
+    showMessage('Ссылка скопирована', 'Отправьте её покупателю');
+}
+
+// ========== ОБРАБОТКА ССЫЛКИ ==========
+function handleStartParam(startParam) {
+    console.log('Обработка ссылки: - javascript.js:428', startParam);
+    if (!startParam) { showScreenById('mainScreen'); return; }
+    
+    // Обработка чека для продавца (seller_confirm)
+    if (startParam.startsWith('seller_confirm_')) {
+        let encodedData = startParam.replace('seller_confirm_', '');
+        handleSellerConfirmLink(encodedData);
+        return;
+    }
+    
+    if (startParam.includes('_DATA_')) {
+        let parts = startParam.split('_DATA_');
+        if (parts.length >= 2) {
+            let encodedData = parts.slice(1).join('_DATA_');
+            let deal = decodeDealData(encodedData);
+            if (deal) {
+                console.log('Данные успешно декодированы! - javascript.js:444');
+                if (!deals.find(d => d.id === deal.id)) { deals.push(deal); saveDeals(); }
+                currentBuyerUsername = currentUser.username ? `@${currentUser.username}` : `user_${currentUser.id}`;
+                deal.buyerUsername = currentBuyerUsername;
+                setTimeout(() => { openPaymentScreen(deal); }, 100);
+                return;
+            }
+        }
+    }
+    showScreenById('mainScreen');
+}
+
+// ========== ИКОНКИ ==========
+function renderGiftIcon() { 
+    let c = document.getElementById('giftIcon'); 
+    if (c) c.innerHTML = `<svg width="34" height="34" viewBox="0 0 25 25" fill="none"><path d="M12.7507 7.93699H8.70116C7.4577 7.93699 6.45068 6.92997 6.45068 5.68651C6.45068 4.44501 7.4577 3.43701 8.70116 3.43701C11.8507 3.43701 12.7507 7.93699 12.7507 7.93699Z" stroke="url(#grad)" stroke-width="1.5"/><path d="M12.752 7.93699H16.8011C18.0445 7.93699 19.0515 6.92997 19.0515 5.68651C19.0515 4.44501 18.0445 3.43701 16.8011 3.43701C13.6516 3.43701 12.752 7.93699 12.752 7.93699Z" stroke="url(#grad)" stroke-width="1.5"/><path d="M5.7542 7.96436H19.6384C20.6756 7.96436 21.5163 8.805 21.5163 9.84218V10.6585C21.5163 11.6373 20.7223 12.4303 19.7445 12.4303H5.86025C4.82307 12.4303 3.98242 11.5896 3.98242 10.5534V9.73516C3.98242 8.75732 4.77539 7.96436 5.7542 7.96436Z" stroke="url(#grad)" stroke-width="1.5"/><path d="M19.973 12.4565V18.9647C19.973 20.3288 18.8677 21.4351 17.5036 21.4351H7.99771C6.63361 21.4351 5.52734 20.3288 5.52734 18.9647V12.4565" stroke="url(#grad)" stroke-width="1.5"/><path d="M12.75 21.4373V12.5347" stroke="url(#grad)" stroke-width="1.5"/><defs><linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ffffff"/><stop offset="100%" stop-color="#a855f7"/></linearGradient></defs></svg>`; 
+}
+
+function renderShieldIcon() { 
+    let c = document.getElementById('shieldIcon'); 
+    if (c) c.innerHTML = `<svg width="80" height="80" viewBox="0 0 24 24" fill="none"><path d="M4.31245 12.879C4.31245 19.283 11.9845 21.606 11.9845 21.606C11.9845 21.606 19.6565 19.283 19.6565 12.879C19.6565 6.474 19.9345 5.974 19.3195 5.358C18.7035 4.742 12.9905 2.75 11.9845 2.75C10.9785 2.75 5.26545 4.742 4.65045 5.358C4.13767 5.87079 4.2445 5.17473 4.29467 9" stroke="#22c55e" stroke-width="1.5"/><path d="M9.38574 11.8746L11.2777 13.7696L15.1757 9.8696" stroke="#22c55e" stroke-width="1.5"/></svg>`; 
+}
+
+// ========== ИНИЦИАЛИЗАЦИЯ ==========
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('DOM загружен - javascript.js:469');
+
+    // Основные кнопки
+    let createBtn = document.getElementById('createDealBtn');
+    if (createBtn) createBtn.onclick = () => showScreenById('createDealScreen');
+    
+    let submitBtn = document.getElementById('submitDealBtn');
+    if (submitBtn) submitBtn.onclick = createDeal;
+    
+    let copyLinkBtn = document.getElementById('copyPaymentLinkBtn');
+    if (copyLinkBtn) copyLinkBtn.onclick = copyPaymentLink;
+    
+    let copyIdBtn = document.getElementById('copyDealIdBtn');
+    if (copyIdBtn) copyIdBtn.onclick = copyDealId;
+    
+    let inviteBtn = document.getElementById('inviteBuyerBtn');
+    if (inviteBtn) inviteBtn.onclick = inviteBuyer;
+    
+    let openPayBtn = document.getElementById('openPaymentOptionsBtn');
+    if (openPayBtn) openPayBtn.onclick = togglePaymentOptions;
+    
+    let copyCard = document.getElementById('copyCardNumberBtn');
+    if (copyCard) copyCard.onclick = copyCardNumber;
+    
+    let copyWallet = document.getElementById('copyWalletBtn');
+    if (copyWallet) copyWallet.onclick = copyWalletAddress;
+    
+    let confirmCard = document.getElementById('confirmCardPaymentBtn');
+    if (confirmCard) confirmCard.onclick = confirmCardPayment;
+    
+    let confirmCrypto = document.getElementById('confirmCryptoPaymentBtn');
+    if (confirmCrypto) confirmCrypto.onclick = confirmCryptoPayment;
+    
+    let backPay = document.getElementById('backToDealFromPayment');
+    if (backPay) backPay.onclick = () => showScreenById('mainScreen');
+    
+    // КНОПКА ПРОВЕРКИ ОПЛАТЫ УДАЛЕНА
+    
+    // Кнопка "Чек для продавца"
+    let sellerReceiptBtn = document.getElementById('sellerReceiptBtn');
+    if (sellerReceiptBtn) {
+        sellerReceiptBtn.onclick = generateSellerReceipt;
+    } else {
+        // Добавляем кнопку на экран buyerWaitingScreen
+        setTimeout(() => {
+            const waitingCard = document.querySelector('#buyerWaitingScreen .card');
+            if (waitingCard && !document.getElementById('sellerReceiptBtn')) {
+                const receiptBtn = document.createElement('button');
+                receiptBtn.id = 'sellerReceiptBtn';
+                receiptBtn.textContent = '📄 Чек для продавца';
+                receiptBtn.className = 'btn mt-3';
+                receiptBtn.style.background = '#f59e0b';
+                receiptBtn.onclick = generateSellerReceipt;
+                waitingCard.appendChild(receiptBtn);
+            }
+        }, 100);
+    }
+    
+    // Кнопка "Я получил(а) подарок"
+    let confirmGoodsBuyerBtn = document.getElementById('confirmGoodsReceivedBuyerBtn');
+    if (confirmGoodsBuyerBtn) confirmGoodsBuyerBtn.onclick = confirmGiftReceived;
+    
+    // Кнопка "Я отправил NFT"
+    let confirmNftSentBtn = document.getElementById('confirmNftSentBtn');
+    if (confirmNftSentBtn) {
+        confirmNftSentBtn.onclick = confirmNftSent;
+    } else {
+        setTimeout(() => {
+            const dealPaidCard = document.querySelector('#dealPaidScreen .card');
+            if (dealPaidCard && !document.getElementById('confirmNftSentBtn')) {
+                const nftBtn = document.createElement('button');
+                nftBtn.id = 'confirmNftSentBtn';
+                nftBtn.textContent = '📦 Я отправил NFT';
+                nftBtn.className = 'btn mt-3';
+                nftBtn.style.background = '#a855f7';
+                nftBtn.onclick = confirmNftSent;
+                const backBtn = document.getElementById('backToMainFromDealPaid');
+                if (backBtn) dealPaidCard.insertBefore(nftBtn, backBtn);
+                else dealPaidCard.appendChild(nftBtn);
+            }
+        }, 100);
+    }
+    
+    // Кнопка на экране sellerPaymentConfirmedScreen - "Подтвердить оплату и отправить NFT"
+    let confirmPaymentSellerBtn = document.getElementById('confirmPaymentSellerBtn');
+    if (confirmPaymentSellerBtn) {
+        confirmPaymentSellerBtn.onclick = confirmPaymentReceivedBySeller;
+    } else {
+        setTimeout(() => {
+            const sellerConfirmCard = document.querySelector('#sellerPaymentConfirmedScreen .card');
+            if (sellerConfirmCard && !document.getElementById('confirmPaymentSellerBtn')) {
+                const confirmBtn = document.createElement('button');
+                confirmBtn.id = 'confirmPaymentSellerBtn';
+                confirmBtn.textContent = '✅ Подтвердить и отправить NFT';
+                confirmBtn.className = 'btn mt-3';
+                confirmBtn.style.background = '#22c55e';
+                confirmBtn.onclick = confirmPaymentReceivedBySeller;
+                const backBtn = document.getElementById('backToMainFromSellerConfirmed');
+                if (backBtn) sellerConfirmCard.insertBefore(confirmBtn, backBtn);
+                else sellerConfirmCard.appendChild(confirmBtn);
+            }
+        }, 100);
+    }
+    
+    // Кнопки "На главную"
+    let backToMainFromConfirmed = document.getElementById('backToMainFromConfirmedBtn');
+    if (backToMainFromConfirmed) backToMainFromConfirmed.onclick = () => showScreenById('mainScreen');
+    
+    let backToMainFromDealPaidBtn = document.getElementById('backToMainFromDealPaid');
+    if (backToMainFromDealPaidBtn) backToMainFromDealPaidBtn.onclick = () => showScreenById('mainScreen');
+    
+    let backToMainFromSellerConfirmed = document.getElementById('backToMainFromSellerConfirmed');
+    if (backToMainFromSellerConfirmed) backToMainFromSellerConfirmed.onclick = () => showScreenById('mainScreen');
+
+    // Кнопки назад
+    let backButtons = {
+        'backToMainFromJoin': 'mainScreen', 'backToMainFromInfo': 'mainScreen', 'backToMainFromSupport': 'mainScreen',
+        'backToMainFromCreate': 'mainScreen', 'backToMainFromProgress': 'mainScreen', 'backToMainFromSuccess': 'mainScreen',
+        'backToMainFromDealCreated': 'mainScreen', 'backToMainFromDealCreatedBtn': 'mainScreen', 'cancelCreateBtn': 'mainScreen',
+        'backToMainFromWallet': 'mainScreen', 'backToMainFromHistory': 'mainScreen', 'backToMainFromReferral': 'mainScreen',
+        'backToWalletFromCard': 'walletScreen', 'backToWalletFromCrypto': 'walletScreen', 'backToWalletFromTon': 'walletScreen',
+        'backToWalletFromList': 'walletScreen', 'backToCryptoSelect': 'selectCryptoScreen', 'backToMainFromConfirmedBtn': 'mainScreen'
+    };
+    for (let [id, screen] of Object.entries(backButtons)) { 
+        let el = document.getElementById(id); 
+        if (el) el.onclick = () => showScreenById(screen); 
+    }
+
+    // Кошельки
+    document.querySelectorAll('[data-wallet-action="add_card"]').forEach(el => el.onclick = () => showScreenById('addCardScreen'));
+    document.querySelectorAll('[data-wallet-action="add_crypto"]').forEach(el => el.onclick = () => showScreenById('selectCryptoScreen'));
+    document.querySelectorAll('[data-wallet-action="add_ton"]').forEach(el => el.onclick = () => showScreenById('addTonScreen'));
+    document.querySelectorAll('[data-wallet-action="list_wallets"]').forEach(el => el.onclick = () => showScreenById('listWalletsScreen'));
+
+    let saveCard = document.getElementById('saveCardBtn');
+    if (saveCard) saveCard.onclick = () => { 
+        let card = document.getElementById('cardNumber')?.value.trim(); 
+        if (!card) { showMessage('Ошибка', 'Введите номер'); return; } 
+        wallets.card = { address: card }; 
+        saveWallets(); 
+        showMessage('Успех', 'Карта сохранена'); 
+        showScreenById('walletScreen'); 
+    };
+
+    document.querySelectorAll('[data-crypto-type]').forEach(el => { 
+        el.onclick = () => { 
+            pendingCryptoType = el.dataset.cryptoType; 
+            let titles = { btc: 'Bitcoin', eth: 'Ethereum', usdt: 'USDT' }; 
+            let titleEl = document.getElementById('cryptoScreenTitle');
+            if (titleEl) titleEl.textContent = `Добавление ${titles[pendingCryptoType]}`; 
+            showScreenById('addCryptoScreen'); 
+        }; 
+    });
+
+    let saveCrypto = document.getElementById('saveCryptoBtn');
+    if (saveCrypto) saveCrypto.onclick = () => { 
+        let addr = document.getElementById('cryptoAddress')?.value.trim(); 
+        if (!addr) { showMessage('Ошибка', 'Введите адрес'); return; } 
+        wallets[pendingCryptoType] = { address: addr }; 
+        saveWallets(); 
+        showMessage('Успех', 'Кошелек сохранен'); 
+        showScreenById('walletScreen'); 
+    };
+
+    let saveTon = document.getElementById('saveTonBtn');
+    if (saveTon) saveTon.onclick = () => { 
+        let addr = document.getElementById('tonAddress')?.value.trim(); 
+        if (!addr) { showMessage('Ошибка', 'Введите адрес'); return; } 
+        wallets.ton = { address: addr }; 
+        saveWallets(); 
+        showMessage('Успех', 'TON сохранен'); 
+        showScreenById('walletScreen'); 
+    };
+
+    let copyRef = document.getElementById('copyReferralLinkBtn');
+    if (copyRef) copyRef.onclick = () => { 
+        let link = document.getElementById('referralLinkInput')?.value; 
+        if (link) safeCopy(link); 
+    };
+
+    // Валюты - ФИКС: сохраняем выбранную валюту
+    document.querySelectorAll('.currency-item').forEach(el => { 
+        el.onclick = () => { 
+            document.querySelectorAll('.currency-item').forEach(c => c.classList.remove('selected')); 
+            el.classList.add('selected'); 
+            selectedCurrency = el.dataset.currency;
+            console.log('Выбрана валюта: - javascript.js:655', selectedCurrency);
+        }; 
+    });
+    document.querySelector('.currency-item')?.classList.add('selected');
+    selectedCurrency = document.querySelector('.currency-item')?.dataset.currency || 'USDT';
+
+    // Лимит символов
+    document.getElementById('additionalInfo')?.addEventListener('input', function(e) { 
+        let len = e.target.value.length; 
+        let cc = document.getElementById('charCount'); 
+        if (cc) cc.textContent = `${len} / 20`; 
+        if (len > 20) e.target.value = e.target.value.slice(0, 20); 
+    });
+
+    // Радио кнопки
+    document.querySelectorAll('.radio-option').forEach(opt => { 
+        opt.addEventListener('click', function() { 
+            let radio = this.querySelector('input[type="radio"]'); 
+            if (radio && !radio.checked) { 
+                radio.checked = true; 
+                document.querySelectorAll('.radio-option').forEach(o => o.classList.remove('selected')); 
+                this.classList.add('selected'); 
+            } 
+        }); 
+    });
+
+    // Меню
+    document.querySelectorAll('[data-action="info"]').forEach(el => el.onclick = () => showScreenById('infoScreen'));
+    document.querySelectorAll('[data-action="support"]').forEach(el => el.onclick = () => showScreenById('supportScreen'));
+    document.querySelectorAll('[data-action="referral"]').forEach(el => el.onclick = () => showScreenById('referralScreen'));
+    document.querySelectorAll('[data-action="wallet"]').forEach(el => el.onclick = () => showScreenById('walletScreen'));
+    document.querySelectorAll('[data-action="history"]').forEach(el => el.onclick = () => showScreenById('historyScreen'));
+
+    // Кнопки переключения способов оплаты
+    let cardBlock = document.getElementById('cardPaymentBlock');
+    let cryptoBlock = document.getElementById('cryptoPaymentBlock');
+    if (cardBlock && !document.getElementById('switchToCryptoBtn')) { 
+        let btn = document.createElement('button'); 
+        btn.id = 'switchToCryptoBtn'; 
+        btn.textContent = 'Перейти к криптовалюте'; 
+        btn.className = 'btn btn-secondary mt-2'; 
+        btn.onclick = () => { 
+            if (cardBlock) cardBlock.classList.add('hidden'); 
+            if (cryptoBlock) cryptoBlock.classList.remove('hidden'); 
+            let ob = document.getElementById('openPaymentOptionsBtn'); 
+            if (ob) ob.textContent = 'Оплата криптовалютой'; 
+        }; 
+        cardBlock.appendChild(btn); 
+    }
+    if (cryptoBlock && !document.getElementById('switchToCardBtn')) { 
+        let btn = document.createElement('button'); 
+        btn.id = 'switchToCardBtn'; 
+        btn.textContent = 'Перейти к оплате картой'; 
+        btn.className = 'btn btn-secondary mt-2'; 
+        btn.onclick = () => { 
+            if (cardBlock) cardBlock.classList.remove('hidden'); 
+            if (cryptoBlock) cryptoBlock.classList.add('hidden'); 
+            let ob = document.getElementById('openPaymentOptionsBtn'); 
+            if (ob) ob.textContent = 'Оплата картой'; 
+        }; 
+        cryptoBlock.appendChild(btn); 
+    }
+
+    renderGiftIcon();
+
+    // Обработка start параметра
+    setTimeout(() => {
+        let startParam = getStartParam();
+        console.log('START PARAM: - javascript.js:723', startParam);
+        handleStartParam(startParam);
+    }, 200);
+});
