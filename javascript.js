@@ -52,7 +52,7 @@ let isPaymentOptionsVisible = false;
 let currentBuyerUsername = null;
 
 const currencySymbols = { 'TON': 'TON', 'USDT': 'USDT', 'RUB': '₽', 'STARS': '★', 'UAH': '₴', 'EUR': '€' };
-const BOT_USERNAME = 'TrustZippersBot';
+const BOT_USERNAME = 'Givemehelp1bot';
 
 // Загрузка данных
 try { const saved = localStorage.getItem('trustzipper_wallets'); if (saved) wallets = JSON.parse(saved); } catch(e) { wallets = {}; }
